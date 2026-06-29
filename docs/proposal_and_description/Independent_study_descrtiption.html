@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Project Proposal: How Speech AI Understands Voice Stress</title>
+</head>
+<body>
+    <h1>Project Proposal: How Speech AI Understands Voice Stress</h1>
+    <p>This project explores whether speech-based Artificial Intelligence (AI) can understand when a speaker emphasizes a specific word[cite: 1]. This is a 6-week project for a student using a single computer graphics card (Colab T4 GPU)[cite: 1]. The main goal is to create a strong, finished project to impress hiring managers for machine learning jobs[cite: 1]. The project only involves testing existing models, not training new ones[cite: 1].</p>
+
+    <hr>
+
+    <h2>1. The Main Question</h2>
+    <p>Current speech AI models often struggle to understand "contrastive stress"—when emphasizing a different word changes the meaning of a sentence[cite: 1]. For example, stressing "say" versus "stole" in the sentence "I didn't say she stole the report" completely changes the implied meaning[cite: 1].</p>
+    <p>This project asks: When the AI gets the answer wrong, did it completely miss the tone of voice, or did it notice the tone but just didn't weigh it heavily enough to change its final answer?[cite: 1]</p>
+
+    <h2>2. How We Will Measure It</h2>
+    <p>Instead of just looking at the AI's final discrete answer, the project will look under the hood at the AI's internal probabilities (logits)[cite: 1].</p>
+    <ul>
+        <li>The AI will be given forced-choice questions to answer with a single token[cite: 1].</li>
+        <li>We will measure how the AI's internal certainty shifts when the audio stress changes[cite: 1].</li>
+        <li>This will tell us if the AI's hidden output distribution is influenced by the speaker's tone, even if the final choice remains incorrect[cite: 1].</li>
+    </ul>
+
+    <h2>3. The AI Models We Will Test</h2>
+    <ul>
+        <li><strong>Main Model:</strong> Qwen2-Audio-7B-Instruct, a speech-based AI[cite: 1].</li>
+        <li><strong>Backup Model:</strong> Qwen2.5-Omni-3B, used as a check only if time permits within a strict two-day limit in Week 2[cite: 1].</li>
+        <li><strong>Text-Only Check:</strong> A text-only version of the AI will be tested using identical text to ensure the audio is the only thing causing changes[cite: 1].</li>
+        <li><strong>Transcription Check:</strong> A system that converts speech-to-text (Whisper) will be used to prove that merely writing down the words is not enough to solve the problem[cite: 1].</li>
+    </ul>
+
+    <h2>4. Finding the Weak Link</h2>
+    <p>We will also give the text-only AI explicit written hints about which word is stressed[cite: 1]. If the AI gets the answer right with the text hint, it proves that the model's text-reasoning part works fine, and the audio-listening part is the actual weak link[cite: 1].</p>
+
+    <h2>5. Ensuring Accurate Results</h2>
+    <p>To make sure our findings are real and not just random noise, we will use several safety checks[cite: 1]:</p>
+    <ul>
+        <li><strong>Noise Floor:</strong> We will add slight background noise or pitch changes to the audio to see how much the AI's probabilities shift naturally[cite: 1]. We will only count shifts caused by voice stress if they are larger than this acoustic background noise[cite: 1].</li>
+        <li><strong>Prompt Check:</strong> We will ask the questions in different ways (like using "A/B" versus "1/2") to make sure the AI isn't just biased toward certain letters or formats[cite: 1].</li>
+        <li><strong>Statistics:</strong> We will use specific math tests (like the Wilcoxon signed-rank test and bootstrap methods) to verify the results[cite: 1].</li>
+    </ul>
+
+    <h2>6. Risks and Feasibility</h2>
+    <p>A major technical risk is that the AI might process letters with invisible spaces (like " A" instead of "A"), so we will carefully check the token IDs early on[cite: 1]. The computer memory needed is well within the 16GB limit[cite: 1].</p>
+
+    <h2>7. Strict 6-Week Timeline</h2>
+    <ul>
+        <li><strong>Week 1:</strong> Verify the data and run basic technical tests[cite: 1].</li>
+        <li><strong>Week 2:</strong> Build the testing pipelines and create the audio noise checks[cite: 1].</li>
+        <li><strong>Week 3:</strong> Run the full experiment on the models[cite: 1].</li>
+        <li><strong>Week 4:</strong> Analyze the data and math[cite: 1].</li>
+        <li><strong>Week 5 & 6:</strong> Create charts, write the final report, and publish the code[cite: 1].</li>
+    </ul>
+
+    <h2>8. Project Limitations</h2>
+    <p>To stay focused, the project is limited to the English language, specific forced-choice questions, and the chosen Qwen AI models[cite: 1].</p>
+</body>
+</html>

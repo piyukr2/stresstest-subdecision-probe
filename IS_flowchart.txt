@@ -1,0 +1,52 @@
+Phase 1: The Foundation (Setting the Baselines)
+Before testing the AI's ability to hear stress, you build a controlled environment to ensure trustworthy data.
+
+Step 1.1: Verify the Benchmark. Confirm the "StressTest" audio dataset is properly structured and clean.
+
+Step 1.2: Build the Acoustic Noise Floor. Add mild, meaning-preserving background noise to audio clips and measure how much the AI's internal probabilities shift just from the noise.
+
+Rationale: You will only count an AI's reaction to voice stress as real if it is larger than its reaction to this basic acoustic noise floor.
+
+Step 1.3: Run the Text-Only & Whisper Checks. Feed identical written transcripts of the audio into a text-only AI and a speech-to-text pipeline.
+
+Rationale: This acts as a falsification check to prove that tone of voice is the only way to solve the problem.
+
+Phase 2: The Core Experiment (The Logit Extraction)
+This is where the actual testing happens on your primary AI model.
+
+Step 2.1: Input the Audio Pairs. Feed the AI two audio clips where the spoken words are identical, but the stressed word changes the meaning.
+
+Step 2.2: Apply Strict Prompting. Ask the AI a forced-choice question and demand a single-token answer.
+
+Step 2.3: Stop & Extract. Halt the AI's generation after its very first token. Extract the hidden probabilities (logits) specifically for the competing answer tokens, ignoring everything else.
+
+Phase 3: The Safety Checks & Branching Results
+Once you have the probabilities, you measure the shifts and determine the immediate finding.
+
+Step 3.1: Calculate the Shift. Measure how much the probability of the correct answer moved between the two different audio clips.
+
+Step 3.2: Filter out the Noise (The Branching Point). Compare this shift against the "Acoustic Noise Floor" established in Phase 1.
+
+👉 Path A (Significant Shift): The shift exceeds the noise floor. The AI noticed the stress but may not have weighed it heavily enough to change the final answer.
+
+👉 Path B (Zero/Negligible Shift): The shift is zero or below the noise floor. You officially categorize the model as showing "no measurable influence".
+
+Step 3.3: Format Swap (Robustness). Rerun the exact same test, but change the prompt options from "A/B" to "1/2".
+
+Rationale: This proves the directional shift survives different formats.
+
+Phase 4: The Diagnostic Probe (Pinpointing the Failure)
+If the AI gave the wrong final answer (especially in Path B), you figure out why the AI failed.
+
+Step 4.1: The Text-Rescue Test. Rerun the failed items, giving the AI an explicit written text hint about which word is stressed.
+
+👉 Outcome A (The "Ears" Failed): The AI answers correctly with the text hint. The LLM backbone is able to use the stress, implicating the upstream audio pathway as the weak link.
+
+👉 Outcome B (The "Brain" Failed): The AI still fails even with the text hint. The limitation is downstream of the audio pathway.
+
+Phase 5: The Final Verdict (The Output)
+The final stage is turning your raw data into a mathematically backed conclusion.
+
+Step 5.1: Statistical Proof. Run the Wilcoxon signed-rank test and bootstrap methods on your findings to mathematically prove your results are robust.
+
+Step 5.2: The Final Conclusion. Determine your graded finding: whether the AI has "no measurable influence" or a "measurable-but-decision-insufficient influence," paired with your architectural diagnosis from Phase 4.

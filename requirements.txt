@@ -1,0 +1,23 @@
+# Core model dependencies
+torch
+transformers
+bitsandbytes
+accelerate
+
+# Audio processing
+librosa
+soundfile
+
+# Dataset access
+datasets
+
+# Data / stats
+numpy
+scipy
+pandas
+
+# Figures
+matplotlib
+
+# Notebook
+jupyter

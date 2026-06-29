@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code local working dir
+.claude/
+
+# HF cache, model weights (we never store these in-repo)
+*.safetensors
+*.bin
+.cache/
+
+# Editor
+.vscode/
+.idea/
+*.swp

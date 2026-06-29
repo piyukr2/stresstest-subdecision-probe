@@ -1,0 +1,291 @@
+"""
+Smoke test: 10-item end-to-end logit extraction on Qwen2-Audio-7B-Instruct (4-bit).
+
+Tests both Format A (A/B tokens) and Format B (1/2 tokens).
+Also runs Strategy 1 (model.generate) on the same 10 items and asserts
+argmax agreement with Strategy 2 (model.forward logits).
+
+Run on Colab after installing dependencies:
+    !pip install transformers bitsandbytes accelerate datasets soundfile -q
+    !python scripts/smoke_test.py
+
+Results are printed to stdout and saved to results/smoke_test_results.json.
+"""
+
+import gc
+import json
+import os
+
+
+# Must be set before torch is imported to take effect during weight loading.
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+import torch
+import numpy as np
+from datasets import load_dataset, Audio
+from transformers import AutoProcessor, Qwen2AudioForConditionalGeneration, BitsAndBytesConfig
+
+# ---------------------------------------------------------------------------
+# Hardcoded token IDs (verified 2026-06-02 on Qwen2-Audio-7B-Instruct)
+# Format A: prompt ends with "Answer:"  → next token is ' A' or ' B'
+# Format B: prompt ends with "Answer: " → next token is '1'  or '2'
+# ---------------------------------------------------------------------------
+TOKEN_A = 362   # ' A' (space-prefixed)
+TOKEN_B = 425   # ' B' (space-prefixed)
+TOKEN_1 = 16    # '1'  (no leading space; space is absorbed into prompt)
+TOKEN_2 = 17    # '2'  (no leading space; space is absorbed into prompt)
+
+MODEL_ID  = "Qwen/Qwen2-Audio-7B-Instruct"
+DATASET   = "slprl/StressTest"
+N_SMOKE   = 20
+RESULTS_PATH = "results/smoke_test_results.json"
+
+# ---------------------------------------------------------------------------
+# Format A prompt builder
+# ---------------------------------------------------------------------------
+FORMAT_A_TEMPLATE = (
+    "Out of the following answers, according to the speaker's stressed words, "
+    "what is most likely the underlying intention of the speaker? "
+    "A. {ans_a} B. {ans_b}"
+)
+
+# Suffix appended AFTER apply_chat_template so it lands inside the assistant
+# turn — making the next predicted token the answer token itself.
+FORMAT_A_SUFFIX = "Answer:"
+FORMAT_B_SUFFIX = "Answer: "
+
+def build_format_a_prompt(possible_answers):
+    return FORMAT_A_TEMPLATE.format(
+        ans_a=possible_answers[0],
+        ans_b=possible_answers[1],
+    )
+
+def build_format_b_prompt(audio_lm_prompt):
+    # Strip the dataset's trailing "Answer:" / "Answer: " — we'll re-append it
+    # after the chat template wrapper so it sits inside the assistant turn.
+    p = audio_lm_prompt.rstrip()
+    if p.endswith("Answer:"):
+        p = p[: -len("Answer:")].rstrip()
+    return p
+
+# ---------------------------------------------------------------------------
+# Load model
+# ---------------------------------------------------------------------------
+def load_model():
+    print(f"Loading processor from {MODEL_ID} ...")
+    processor = AutoProcessor.from_pretrained(MODEL_ID)
+
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_quant_type="nf4",
+    )
+
+    gc.collect()
+    torch.cuda.empty_cache()
+    print(f"Loading model in 4-bit ...")
+    model = Qwen2AudioForConditionalGeneration.from_pretrained(
+        MODEL_ID,
+        quantization_config=bnb_config,
+        device_map="auto",
+        torch_dtype=torch.float16,
+        low_cpu_mem_usage=True,
+    )
+    model.eval()
+    return processor, model
+
+# ---------------------------------------------------------------------------
+# Strategy 2: direct forward pass — logits at final prompt token position
+# ---------------------------------------------------------------------------
+def strategy2_logits(processor, model, audio_array, sr, text_prompt, fmt):
+    """
+    Returns (p_first, p_second) 2-way softmax probabilities.
+    For Format A: first=TOKEN_A, second=TOKEN_B
+    For Format B: first=TOKEN_1, second=TOKEN_2
+    """
+    assert fmt in ("A", "B")
+    tok_first = TOKEN_A if fmt == "A" else TOKEN_1
+    tok_second = TOKEN_B if fmt == "A" else TOKEN_2
+    suffix = FORMAT_A_SUFFIX if fmt == "A" else FORMAT_B_SUFFIX
+
+    conversation = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "audio", "audio_url": "__local__"},
+                {"type": "text",  "text": text_prompt},
+            ],
+        }
+    ]
+
+    text = processor.apply_chat_template(
+        conversation, add_generation_prompt=True, tokenize=False
+    )
+    # Place "Answer:" inside the assistant turn so the next predicted token
+    # is the answer token itself, not the start of a free-form reply.
+    text = text + suffix
+    inputs = processor(
+        text=text,
+        audio=audio_array,
+        return_tensors="pt",
+        sampling_rate=sr,
+    )
+    inputs = {k: v.to(model.device) for k, v in inputs.items()}
+
+    with torch.no_grad():
+        outputs = model(**inputs)
+
+    # logits shape: (batch, seq_len, vocab_size) — take last position
+    logits_last = outputs.logits[0, -1, :]
+    logit_first  = logits_last[tok_first].float().item()
+    logit_second = logits_last[tok_second].float().item()
+
+    # 2-way softmax
+    max_l = max(logit_first, logit_second)
+    exp_f = np.exp(logit_first  - max_l)
+    exp_s = np.exp(logit_second - max_l)
+    total = exp_f + exp_s
+    return exp_f / total, exp_s / total
+
+# ---------------------------------------------------------------------------
+# Strategy 1: model.generate — returns the first new token ID (int)
+#
+# Greedy decoding is argmax of logits, so if Strategy 2 reads the right
+# position and token IDs, generated[0, input_len] must equal
+# argmax(logits[0, -1, :]). We compare raw IDs — no string parsing.
+# ---------------------------------------------------------------------------
+def strategy1_first_token_id(processor, model, audio_array, sr, text_prompt, fmt):
+    assert fmt in ("A", "B")
+    suffix = FORMAT_A_SUFFIX if fmt == "A" else FORMAT_B_SUFFIX
+
+    conversation = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "audio", "audio_url": "__local__"},
+                {"type": "text",  "text": text_prompt},
+            ],
+        }
+    ]
+
+    text = processor.apply_chat_template(
+        conversation, add_generation_prompt=True, tokenize=False
+    )
+    text = text + suffix
+    inputs = processor(
+        text=text,
+        audio=audio_array,
+        return_tensors="pt",
+        sampling_rate=sr,
+    )
+    inputs = {k: v.to(model.device) for k, v in inputs.items()}
+
+    with torch.no_grad():
+        generated = model.generate(
+            **inputs,
+            max_new_tokens=1,
+            do_sample=False,
+        )
+
+    input_len = inputs["input_ids"].shape[1]
+    return generated[0, input_len].item()
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+def main():
+    processor, model = load_model()
+
+    print(f"Loading dataset {DATASET} ...")
+    ds = load_dataset(DATASET, split="test")
+    ds = ds.cast_column("audio", Audio(sampling_rate=16000))
+    items = [ds[i] for i in range(N_SMOKE)]
+
+    results = []
+    mismatches = []
+
+    print(f"\nRunning {N_SMOKE}-item smoke test ...\n")
+    header = f"{'i':>3}  {'label':>5}  {'FmtA argmax':>11}  {'FmtA p_A':>8}  {'FmtA p_B':>8}  {'FmtB argmax':>11}  {'FmtB p_1':>8}  {'FmtB p_2':>8}  {'gen_A':>6}  {'gen_B':>6}  {'match_A':>10}  {'match_B':>10}"
+    print(header)
+    print("-" * len(header))
+
+    for i, item in enumerate(items):
+        audio_array = np.array(item["audio"]["array"], dtype=np.float32)
+        sr          = item["audio"]["sampling_rate"]
+        label       = item["label"]           # 0 or 1
+        answers     = item["possible_answers"]
+        audio_lm    = item["audio_lm_prompt"]
+
+        prompt_a = build_format_a_prompt(answers)
+        prompt_b = build_format_b_prompt(audio_lm)
+
+        # Strategy 2
+        p_A, p_B = strategy2_logits(processor, model, audio_array, sr, prompt_a, "A")
+        p_1, p_2 = strategy2_logits(processor, model, audio_array, sr, prompt_b, "B")
+
+        argmax_a = 0 if p_A > p_B else 1   # index into possible_answers
+        argmax_b = 0 if p_1 > p_2 else 1
+
+        # Strategy 1: get first generated token ID (greedy = logit argmax)
+        gen_a_tid = strategy1_first_token_id(processor, model, audio_array, sr, prompt_a, "A")
+        gen_b_tid = strategy1_first_token_id(processor, model, audio_array, sr, prompt_b, "B")
+
+        # Map token ID → answer index (0 or 1), or -1 if neither expected token
+        gen_a_idx = 0 if gen_a_tid == TOKEN_A else (1 if gen_a_tid == TOKEN_B else -1)
+        gen_b_idx = 0 if gen_b_tid == TOKEN_1 else (1 if gen_b_tid == TOKEN_2 else -1)
+
+        # Decode token ID for display
+        gen_a_str = processor.tokenizer.decode([gen_a_tid])
+        gen_b_str = processor.tokenizer.decode([gen_b_tid])
+
+        # FAIL if (a) Strategy 1 generated something other than an expected
+        # answer token, or (b) Strategy 1 and Strategy 2 argmax disagree.
+        # Previously match=None (unexpected token) was silently treated as
+        # "not a failure" — that masked the chat-template position bug.
+        match_a = (gen_a_idx != -1) and (argmax_a == gen_a_idx)
+        match_b = (gen_b_idx != -1) and (argmax_b == gen_b_idx)
+
+        if not match_a or not match_b:
+            mismatches.append(i)
+
+        row = {
+            "idx": i,
+            "label": int(label),
+            "format_a": {
+                "p_A": round(p_A, 4), "p_B": round(p_B, 4), "argmax": argmax_a,
+                "gen_token_id": gen_a_tid, "gen_token": gen_a_str, "match": match_a,
+            },
+            "format_b": {
+                "p_1": round(p_1, 4), "p_2": round(p_2, 4), "argmax": argmax_b,
+                "gen_token_id": gen_b_tid, "gen_token": gen_b_str, "match": match_b,
+            },
+        }
+        results.append(row)
+
+        match_a_str = "OK" if match_a else f"FAIL({gen_a_str.strip()[:4]})"
+        match_b_str = "OK" if match_b else f"FAIL({gen_b_str.strip()[:4]})"
+        print(
+            f"{i:>3}  {label:>5}  "
+            f"{'AB'[argmax_a]:>11}  {p_A:>8.4f}  {p_B:>8.4f}  "
+            f"{'12'[argmax_b]:>11}  {p_1:>8.4f}  {p_2:>8.4f}  "
+            f"{gen_a_str.strip()[:6]:>6}  {gen_b_str.strip()[:6]:>6}  "
+            f"{match_a_str:>10}  {match_b_str:>10}"
+        )
+
+    # Summary
+    print(f"\n{'='*60}")
+    if mismatches:
+        print(f"SANITY CHECK FAILED on items: {mismatches}")
+        print("Strategy 1 and Strategy 2 argmax disagree. Debug before proceeding.")
+    else:
+        print(f"SANITY CHECK PASSED: Strategy 1 and Strategy 2 argmax agree on all {N_SMOKE} items.")
+
+    # Save results
+    os.makedirs(os.path.dirname(RESULTS_PATH), exist_ok=True)
+    with open(RESULTS_PATH, "w") as f:
+        json.dump(results, f, indent=2)
+    print(f"Results saved to {RESULTS_PATH}")
+
+if __name__ == "__main__":
+    main()
