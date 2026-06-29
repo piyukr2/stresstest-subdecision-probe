@@ -1,0 +1,282 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\hypersetup{
+    colorlinks=true,
+    urlcolor=blue!60!black,
+    linkcolor=black,
+    citecolor=black
+}
+\usepackage{parskip}
+\usepackage{enumitem}
+\setlist{itemsep=2pt,topsep=2pt}
+
+\title{Sub-Decision Prosodic Sensitivity in Speech-LLMs\\
+\large Problem Statement and Project Plan}
+\author{Piyush Kumar Agarwal}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section*{The Research Question in One Sentence}
+
+When a speech-capable large language model gets a contrastive-stress
+question \emph{wrong}, does the acoustic stress in the speaker's voice
+still shift the model's internal answer distribution --- even if it
+doesn't shift the final answer?
+
+\section*{Why This Question Matters}
+
+Speech-LLMs are increasingly deployed in voice assistants, transcription
+tools, and accessibility software. Prior work (StressTest, HUJI 2025)
+shows these models often pick the wrong answer when meaning hinges on
+prosody. But a \emph{wrong final answer} is a coarse signal. The model
+might be:
+
+\begin{itemize}
+    \item \textbf{Truly deaf to prosody} --- its internal probabilities
+    don't move at all.
+    \item \textbf{Partially sensitive} --- its probabilities shift in
+    the correct direction, but not enough to change the top choice.
+\end{itemize}
+
+These two failure modes call for very different engineering fixes. The
+first implicates the audio encoder (``the ears''); the second
+implicates the language model backbone (``the brain''). This project
+distinguishes them by reading the model's hidden probability
+distribution instead of just its top-1 answer.
+
+\section*{Scope and Constraints}
+
+\begin{itemize}
+    \item \textbf{Inference only} --- no training, no fine-tuning.
+    \item \textbf{Primary model:} Qwen2-Audio-7B-Instruct, loaded in
+    4-bit quantization.
+    \item \textbf{Hardware:} single 16~GB GPU (Google Colab T4).
+    \item \textbf{Timeline:} $\sim$6 weeks, part-time.
+    \item \textbf{Benchmark:} StressTest (\texttt{slprl/StressTest} on
+    HuggingFace) --- 218 audio items, each a sentence whose meaning
+    depends on which word the speaker stresses.
+\end{itemize}
+
+\section{Phase 1 --- Foundation: Setting the Baselines}
+
+\textbf{Goal.} Build a controlled environment so any signal we
+attribute to stress is defensibly \emph{not} an artifact of noise,
+text, or pipeline bugs.
+
+\subsection*{Step 1.1 --- Verify the Benchmark}
+
+Confirm the StressTest dataset loads, has the expected schema (audio
+at 16~kHz, two possible answers per item, a ground-truth label), and a
+usable license (CC-BY-NC-4.0 for academic work).
+
+\textbf{Rationale.} Every downstream measurement assumes the dataset
+is what we think it is. A two-hour verification step at the start
+prevents weeks of analysis built on misread columns.
+
+\subsection*{Step 1.2 --- Build the Acoustic Noise Floor}
+
+Apply small, \textbf{meaning-preserving} perturbations to each audio
+clip --- a mild gain change, low-level additive noise, a $\pm 5\%$
+time-stretch --- and measure how much the model's internal probability
+for the correct answer shifts purely from those perturbations.
+
+\textbf{Rationale.} Any model's output distribution wobbles slightly
+when the input changes, even when the change is semantically
+meaningless. We need to know how big that ``baseline wobble'' is
+before we can claim a stress-induced shift is real. The
+pre-registered rule: a stress shift must exceed the \textbf{95th
+percentile} of the noise-floor distribution to count as meaningful.
+
+\textit{Design note.} An earlier plan considered using same-speaker
+duplicate takes from the benchmark as the noise floor. On inspection,
+StressTest's multiple versions of each sentence carry \emph{different}
+stress patterns --- they are the experimental stimuli, not duplicate
+takes. So we use synthetic perturbations instead, which are also
+fully reproducible.
+
+\subsection*{Step 1.3 --- Text-Only and Whisper Falsification Checks}
+
+Feed the written \textbf{transcript} of each audio clip into:
+
+\begin{enumerate}
+    \item A text-only LLM (no audio modality at all).
+    \item A cascade pipeline: Whisper transcribes the audio
+    $\rightarrow$ text-LLM answers from the transcript.
+\end{enumerate}
+
+\textbf{Rationale.} If either of these systems can solve StressTest
+from text alone, then audio prosody is \emph{not} the only path to the
+answer, and the experiment is ill-posed. Both pipelines should
+perform near chance. This is a falsification check on the entire
+study premise.
+
+\section{Phase 2 --- Core Experiment: Logit Extraction}
+
+\textbf{Goal.} Measure not just what the model \emph{says}, but the
+probability distribution behind what it says.
+
+\subsection*{Step 2.1 --- Input the Audio Pairs}
+
+Each StressTest item is part of a pair: same words, different
+stressed word, opposite correct answer. Feed both audio versions
+through the model.
+
+\subsection*{Step 2.2 --- Strict Forced-Choice Prompting}
+
+Ask the model a single forced-choice question with two answer
+options, and prompt it so the next predicted token is constrained to
+one of two specific tokens. We use two answer formats:
+
+\begin{itemize}
+    \item \textbf{Format A:} options labeled \texttt{A.} and
+    \texttt{B.}; next token is \texttt{\ A} or \texttt{\ B}.
+    \item \textbf{Format B:} options labeled \texttt{1.} and
+    \texttt{2.}; next token is \texttt{1} or \texttt{2}.
+\end{itemize}
+
+The two formats let us test whether any observed effect is genuine
+prosodic sensitivity or an artifact of how the options were labeled.
+
+\subsection*{Step 2.3 --- Stop and Extract the Logits}
+
+Instead of letting the model generate a full sentence, we halt after
+the \textbf{very first token} and read the raw logit values for
+exactly the two competing answer tokens. A two-way softmax over those
+two logits gives a clean probability for each candidate answer.
+
+\textbf{Rationale.} A free-form generated answer collapses a rich
+probability distribution into a single argmax decision. Reading the
+logits directly preserves the sub-decision information that is the
+whole point of this study. Restricting the softmax to the two answer
+tokens (rather than the full vocabulary) gives a well-defined
+``probability of A given the question is A or B.''
+
+\textit{Pipeline integrity check.} Independently run
+\texttt{model.generate()} for one token on a sample of items and
+assert that its output token matches the argmax of our extracted
+logits. If they disagree, the extraction code has a bug and
+everything stops until it's fixed.
+
+\section{Phase 3 --- Safety Checks and Branching Results}
+
+\textbf{Goal.} Decide, per item, whether the model exhibited a real
+reaction to stress.
+
+\subsection*{Step 3.1 --- Calculate the Shift}
+
+For each pair, compute how much the probability of the \emph{correct}
+answer changed between the two audio versions. This is the
+``stress-induced shift.''
+
+\subsection*{Step 3.2 --- Filter Against the Noise Floor (Branching Point)}
+
+Compare the stress-induced shift to the noise-floor distribution from
+Step 1.2.
+
+\begin{itemize}
+    \item \textbf{Path A --- Significant Shift.} The shift exceeds the
+    95th-percentile noise threshold. The model \emph{noticed} the
+    stress at the distributional level. If it still picked the wrong
+    final answer, this is a \textbf{measurable-but-decision-
+    insufficient} influence: the signal was there but underweighted.
+    \item \textbf{Path B --- Negligible Shift.} The shift falls within
+    the noise floor. We categorize the model as showing \textbf{no
+    measurable influence} for this item.
+\end{itemize}
+
+\subsection*{Step 3.3 --- Format Swap for Robustness}
+
+Re-run the entire experiment with Format B (1/2) and check that
+whatever directional effect we saw in Format A (A/B) survives. A real
+prosodic effect should not depend on whether the answer was called
+``A'' or ``1.''
+
+\section{Phase 4 --- Diagnostic Probe: Pinpointing the Failure}
+
+\textbf{Goal.} When the model fails (especially Path~B items),
+determine \emph{where} in the architecture the failure lives.
+
+\subsection*{Step 4.1 --- Text-Rescue Test}
+
+Re-present each failed item to the model, but this time encode the
+stress \textbf{in the transcript} by capitalizing the stressed word
+in ALL CAPS (e.g., \texttt{"I NEVER said he stole it."}).
+
+\begin{itemize}
+    \item \textbf{Outcome A --- The ``Ears'' Failed.} The model now
+    answers correctly. The language backbone can use prosodic
+    information when it arrives in text form; the bottleneck is the
+    upstream audio pathway (encoder, projector, fusion).
+    \item \textbf{Outcome B --- The ``Brain'' Failed.} The model
+    still gets it wrong even with the explicit text hint. The
+    limitation lives downstream of the audio pathway, in how the
+    language model integrates the stress signal into its reasoning.
+\end{itemize}
+
+\textbf{Rationale.} This is the diagnostic payoff of the whole study.
+It converts an opaque ``the model got it wrong'' into an actionable
+architectural attribution.
+
+\section{Phase 5 --- Final Verdict: Statistical Proof and Conclusion}
+
+\textbf{Goal.} Convert per-item measurements into a defensible
+aggregate claim.
+
+\subsection*{Step 5.1 --- Statistical Testing}
+
+\begin{itemize}
+    \item \textbf{Wilcoxon signed-rank test} on paired shifts
+    (matched pairs of audio stimuli). Chosen because it's
+    non-parametric and appropriate for paired data without
+    distributional assumptions.
+    \item \textbf{Bootstrap 95\% confidence intervals} on the shift
+    magnitude and the decision-flip rate, to characterize effect
+    size and uncertainty.
+\end{itemize}
+
+\textit{Honesty note.} With $\sim$109 pairs, statistical power is
+modest. Confidence-interval \emph{widths} will be reported as
+prominently as $p$-values, so the conclusion is calibrated to the
+data we actually have.
+
+\subsection*{Step 5.2 --- Final Graded Conclusion}
+
+For the primary model (Qwen2-Audio-7B), pair the quantitative finding
+from Step~5.1 with the architectural diagnosis from Phase~4 to produce
+a per-item characterization of the model's prosodic sensitivity.
+
+\section*{Headline Outputs of the Study}
+
+\begin{enumerate}
+    \item \textbf{Decision-flip rate} --- fraction of pairs where the
+    model's top answer flips in the correct direction when stress
+    flips.
+    \item \textbf{Stress-induced shift magnitude vs.\ acoustic noise
+    floor} --- the distribution of sub-decision shifts, plotted
+    against the noise threshold.
+    \item \textbf{Architectural attribution} --- per-item
+    categorization of ``ears failed'' vs.\ ``brain failed'' from the
+    text-rescue probe.
+\end{enumerate}
+
+\section*{What This Study Will \emph{Not} Claim}
+
+\begin{itemize}
+    \item It will not claim Qwen2-Audio is universally
+    prosody-blind or prosody-aware. The claim is specific to
+    \textbf{contrastive lexical stress} as operationalized by
+    StressTest.
+    \item It will not claim training-time fixes. The project is
+    inference-only and diagnostic.
+    \item It will not generalize beyond English or beyond the
+    speakers in StressTest.
+\end{itemize}
+
+\end{document}
+
