@@ -16,6 +16,10 @@ Thumbs.db
 # Claude Code local working dir
 .claude/
 
+# Personal working notes / briefings — not for public surface
+temp_explanation/
+docs/Project_steps_results_so_far_explanation.html
+
 # HF cache, model weights (we never store these in-repo)
 *.safetensors
 *.bin
